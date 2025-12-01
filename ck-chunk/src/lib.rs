@@ -136,6 +136,7 @@ pub enum ParseableLanguage {
     Go,
     CSharp,
     Zig,
+    Elixir,
 }
 
 impl std::fmt::Display for ParseableLanguage {
@@ -150,6 +151,7 @@ impl std::fmt::Display for ParseableLanguage {
             ParseableLanguage::Go => "go",
             ParseableLanguage::CSharp => "csharp",
             ParseableLanguage::Zig => "zig",
+            ParseableLanguage::Elixir => "elixir",
         };
         write!(f, "{}", name)
     }
@@ -169,6 +171,7 @@ impl TryFrom<ck_core::Language> for ParseableLanguage {
             ck_core::Language::Go => Ok(ParseableLanguage::Go),
             ck_core::Language::CSharp => Ok(ParseableLanguage::CSharp),
             ck_core::Language::Zig => Ok(ParseableLanguage::Zig),
+            ck_core::Language::Elixir => Ok(ParseableLanguage::Elixir),
             _ => Err(anyhow::anyhow!(
                 "Language {:?} is not supported for parsing",
                 lang
@@ -358,6 +361,7 @@ pub(crate) fn tree_sitter_language(language: ParseableLanguage) -> Result<tree_s
         ParseableLanguage::Go => tree_sitter_go::LANGUAGE,
         ParseableLanguage::CSharp => tree_sitter_c_sharp::LANGUAGE,
         ParseableLanguage::Zig => tree_sitter_zig::LANGUAGE,
+        ParseableLanguage::Elixir => tree_sitter_elixir::LANGUAGE,
     };
 
     Ok(ts_language.into())
@@ -793,6 +797,9 @@ fn chunk_type_for_node(
                 | "error_set_declaration"
                 | "comptime_declaration"
         ),
+        // Elixir uses "call" nodes for defmodule, def, defp, etc.
+        // We handle this specially via query-based chunking
+        ParseableLanguage::Elixir => matches!(kind, "call" | "do_block"),
     };
 
     if !supported {
@@ -1098,6 +1105,10 @@ fn display_name_for_node(
         ParseableLanguage::Go => find_identifier(node, source, &["identifier", "type_identifier"]),
         ParseableLanguage::CSharp => find_identifier(node, source, &["identifier"]),
         ParseableLanguage::Zig => find_identifier(node, source, &["identifier"]),
+        ParseableLanguage::Elixir => {
+            // Elixir names can be aliases (module names) or atoms/identifiers
+            find_identifier(node, source, &["alias", "identifier", "atom"])
+        }
     }
 }
 
@@ -1207,6 +1218,7 @@ fn is_method_context(node: tree_sitter::Node<'_>, language: ParseableLanguage) -
         ParseableLanguage::CSharp => false,
         ParseableLanguage::Haskell => false,
         ParseableLanguage::Zig => false,
+        ParseableLanguage::Elixir => false, // Elixir doesn't have class-based methods
     }
 }
 
@@ -2443,6 +2455,161 @@ fibonacci n = fibonacci (n - 1) + fibonacci (n - 2)
         assert!(
             fac.text.contains("factorial n = n * factorial (n - 1)"),
             "Should include recursive case"
+        );
+    }
+
+    #[test]
+    fn test_chunk_elixir_basic() {
+        let elixir_code = r#"
+defmodule Calculator do
+  @moduledoc "A simple calculator module"
+
+  def add(a, b) do
+    a + b
+  end
+
+  defp multiply(a, b) do
+    a * b
+  end
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        eprintln!("\n=== ELIXIR CHUNKS ===");
+        for (i, chunk) in chunks.iter().enumerate() {
+            eprintln!(
+                "Chunk {}: {:?} L{}-{}",
+                i, chunk.chunk_type, chunk.span.line_start, chunk.span.line_end
+            );
+            eprintln!("  Text: {:?}", &chunk.text[..chunk.text.len().min(80)]);
+        }
+        eprintln!("=== END CHUNKS ===\n");
+
+        assert!(!chunks.is_empty(), "Should find chunks in Elixir code");
+
+        // Should have module and function chunks
+        let has_module = chunks.iter().any(|c| c.chunk_type == ChunkType::Module);
+        let has_function = chunks.iter().any(|c| c.chunk_type == ChunkType::Function);
+
+        assert!(has_module, "Should detect defmodule as Module");
+        assert!(has_function, "Should detect def/defp as Function");
+    }
+
+    #[test]
+    fn test_chunk_elixir_protocol() {
+        let elixir_code = r#"
+defprotocol Stringable do
+  @doc "Converts to string"
+  def to_string(value)
+end
+
+defimpl Stringable, for: Integer do
+  def to_string(value), do: Integer.to_string(value)
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        eprintln!("\n=== ELIXIR PROTOCOL CHUNKS ===");
+        for (i, chunk) in chunks.iter().enumerate() {
+            eprintln!(
+                "Chunk {}: {:?} L{}-{}",
+                i, chunk.chunk_type, chunk.span.line_start, chunk.span.line_end
+            );
+            eprintln!("  Text: {:?}", &chunk.text[..chunk.text.len().min(80)]);
+        }
+        eprintln!("=== END CHUNKS ===\n");
+
+        // Should detect protocol and implementation as modules
+        let modules: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Module)
+            .collect();
+
+        assert!(
+            modules.len() >= 2,
+            "Should detect defprotocol and defimpl as modules, found {}",
+            modules.len()
+        );
+    }
+
+    #[test]
+    fn test_chunk_elixir_genserver() {
+        let elixir_code = r#"
+defmodule MyServer do
+  use GenServer
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def init(state) do
+    {:ok, state}
+  end
+
+  def handle_call(:get, _from, state) do
+    {:reply, state, state}
+  end
+
+  def handle_cast({:set, value}, _state) do
+    {:noreply, value}
+  end
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        // Should capture all GenServer callbacks as functions
+        let functions: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Function)
+            .collect();
+
+        assert!(
+            functions.len() >= 4,
+            "Should detect at least 4 functions (start_link, init, handle_call, handle_cast), found {}",
+            functions.len()
+        );
+    }
+
+    #[test]
+    fn test_elixir_extension_detection() {
+        use ck_core::Language;
+
+        assert_eq!(Language::from_extension("ex"), Some(Language::Elixir));
+        assert_eq!(Language::from_extension("exs"), Some(Language::Elixir));
+        assert_eq!(Language::from_extension("EX"), Some(Language::Elixir));
+        assert_eq!(Language::from_extension("EXS"), Some(Language::Elixir));
+    }
+
+    #[test]
+    fn test_chunk_elixir_macros() {
+        let elixir_code = r#"
+defmodule MyMacros do
+  defmacro unless(condition, do: block) do
+    quote do
+      if !unquote(condition), do: unquote(block)
+    end
+  end
+
+  defmacrop private_macro(x) do
+    quote do: unquote(x) * 2
+  end
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        let functions: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Function)
+            .collect();
+
+        assert!(
+            functions.len() >= 2,
+            "Should detect defmacro and defmacrop as functions, found {}",
+            functions.len()
         );
     }
 }

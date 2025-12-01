@@ -90,6 +90,7 @@ fn builtin_query(language: ParseableLanguage) -> Option<&'static str> {
         ParseableLanguage::Go => Some(include_str!("../queries/go/tags.scm")),
         ParseableLanguage::CSharp => Some(include_str!("../queries/csharp/tags.scm")),
         ParseableLanguage::Zig => Some(include_str!("../queries/zig/tags.scm")),
+        ParseableLanguage::Elixir => Some(include_str!("../queries/elixir/tags.scm")),
     }
 }
 
