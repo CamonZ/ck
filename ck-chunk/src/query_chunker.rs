@@ -102,6 +102,8 @@ fn chunk_type_from_capture(name: &str) -> Option<ChunkType> {
         "method" => Some(ChunkType::Method),
         "class" | "struct" | "enum" | "trait" => Some(ChunkType::Class),
         "module" | "namespace" | "impl" | "mod" => Some(ChunkType::Module),
+        // Module attributes (Elixir @spec, @type, @callback, @behaviour)
+        "spec" | "type" | "callback" | "behaviour" => Some(ChunkType::Text),
         "text" | "import" => Some(ChunkType::Text),
         _ => None,
     }

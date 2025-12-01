@@ -2612,4 +2612,127 @@ end
             functions.len()
         );
     }
+
+    #[test]
+    fn test_chunk_elixir_module_attributes() {
+        let elixir_code = r#"
+defmodule Calculator do
+  @moduledoc "A calculator with type specs"
+
+  @behaviour GenServer
+
+  @type operation :: :add | :subtract | :multiply | :divide
+  @typep internal_state :: %{history: list()}
+  @opaque result :: {:ok, number()} | {:error, atom()}
+
+  @callback init(args :: term()) :: {:ok, state :: term()}
+  @callback handle_call(request :: term(), from :: term(), state :: term()) :: {:reply, term(), term()}
+
+  @optional_callbacks [handle_info: 2]
+
+  @spec add(number(), number()) :: number()
+  def add(a, b), do: a + b
+
+  @spec subtract(number(), number()) :: number()
+  def subtract(a, b), do: a - b
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        eprintln!("\n=== ELIXIR MODULE ATTRIBUTES CHUNKS ===");
+        for (i, chunk) in chunks.iter().enumerate() {
+            eprintln!(
+                "Chunk {}: {:?} L{}-{}",
+                i, chunk.chunk_type, chunk.span.line_start, chunk.span.line_end
+            );
+            eprintln!("  Text: {:?}", &chunk.text[..chunk.text.len().min(80)]);
+        }
+        eprintln!("=== END CHUNKS ===\n");
+
+        // Check for @behaviour
+        let has_behaviour = chunks
+            .iter()
+            .any(|c| c.chunk_type == ChunkType::Text && c.text.contains("@behaviour GenServer"));
+        assert!(has_behaviour, "Should capture @behaviour declaration");
+
+        // Check for @type definitions
+        let type_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| {
+                c.chunk_type == ChunkType::Text
+                    && (c.text.contains("@type")
+                        || c.text.contains("@typep")
+                        || c.text.contains("@opaque"))
+            })
+            .collect();
+        assert!(
+            type_chunks.len() >= 3,
+            "Should capture @type, @typep, and @opaque, found {}",
+            type_chunks.len()
+        );
+
+        // Check for @callback definitions
+        let callback_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Text && c.text.contains("@callback"))
+            .collect();
+        assert!(
+            callback_chunks.len() >= 2,
+            "Should capture @callback definitions, found {}",
+            callback_chunks.len()
+        );
+
+        // Check for @spec definitions
+        let spec_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Text && c.text.contains("@spec"))
+            .collect();
+        assert!(
+            spec_chunks.len() >= 2,
+            "Should capture @spec definitions, found {}",
+            spec_chunks.len()
+        );
+
+        // Verify we still capture the functions
+        let function_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Function)
+            .collect();
+        assert!(
+            function_chunks.len() >= 2,
+            "Should still capture def functions, found {}",
+            function_chunks.len()
+        );
+    }
+
+    #[test]
+    fn test_chunk_elixir_behavior_spelling() {
+        // Test both British and American spellings
+        let elixir_code = r#"
+defmodule BritishModule do
+  @behaviour GenServer
+end
+
+defmodule AmericanModule do
+  @behavior GenServer
+end
+"#;
+
+        let chunks = chunk_language(elixir_code, ParseableLanguage::Elixir).unwrap();
+
+        let behaviour_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| {
+                c.chunk_type == ChunkType::Text
+                    && (c.text.contains("@behaviour") || c.text.contains("@behavior"))
+            })
+            .collect();
+
+        assert!(
+            behaviour_chunks.len() >= 2,
+            "Should capture both @behaviour and @behavior spellings, found {}",
+            behaviour_chunks.len()
+        );
+    }
 }
